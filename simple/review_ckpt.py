@@ -3,8 +3,9 @@
 For every ckpt-XXXXX.pt in RUN: exact sha256, zip member names, restricted load
 (weights_only=True), exact structure (control/model/opt), every string in the decoded
 object against an allowlist of field names, and the binding to chain.jsonl (control and
-state digest equal the committed entry). Prints one JSON line per file; exit 1 on any
-finding, or when there was nothing to review.
+state digest equal the committed entry). A .pt file in RUN that no chain entry covers, or a
+leftover ckpt.tmp, is a finding: it would be published without review. Prints one JSON line
+per file; exit 1 on any finding, or when there was nothing to review.
     OVL_DEVICE=cpu python simple/review_ckpt.py RUN
 """
 import hashlib
@@ -148,23 +149,30 @@ def main():
     allowed_fields.update(set(CONTROL) | ADAM_STATE | ADAM_GROUP | {"control", "model", "opt", "state", "param_groups",
                                                                    "wikipedia", "conversation", "exclude"})
     failed = False
-    reviewed = 0
+    reviewed = set()
     for entry in chain:
         path = run / f"ckpt-{entry['index']:05d}.pt"
         if not path.exists():
             continue
         r = review(path, entry, model_keys)
-        reviewed += 1
+        reviewed.add(path.name)
         failed |= r["result"] != "PASS"
         print(json.dumps(r, sort_keys=True), flush=True)
     for name, kind in (("base-model.pt", "base"), ("conversation-model.pt", "final")):
         entry = next((e for e in chain if e["kind"] == kind), None)
         if entry and (run / name).exists():
             r = review_model(run / name, entry, model_keys)
-            reviewed += 1
+            reviewed.add(name)
             failed |= r["result"] != "PASS"
             print(json.dumps(r, sort_keys=True), flush=True)
-    if not reviewed:
+    # A checkpoint written just before a crash has no chain entry yet (train writes the file first).
+    for path in sorted(p for p in run.iterdir() if p.is_file() and (p.suffix == ".pt" or p.name == "ckpt.tmp")):
+        if path.name not in reviewed:
+            failed = True
+            print(json.dumps({"file": path.name, "result": "FAIL",
+                              "problems": ["no chain entry covers this file, so it was not reviewed"]},
+                             sort_keys=True), flush=True)
+    if not reviewed and not failed:
         sys.exit(f"nothing to review in {run}: no ckpt-*.pt, base-model.pt or conversation-model.pt "
                  "matches an entry in chain.jsonl")
     sys.exit(1 if failed else 0)

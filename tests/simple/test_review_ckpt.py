@@ -99,6 +99,35 @@ class CheckpointReviewTests(unittest.TestCase):
         self.assertEqual((code, result["result"]), (1, "FAIL"))
         self.assertIn("control differs from chain", result["problems"])
 
+    def unbound_file_fails(self, name, payload):
+        """An honest entry-0 checkpoint passes, but `name`, which no chain entry covers, fails the review."""
+        torch.save(payload, self.run / name)
+        torch.save(self.ck, self.run / "ckpt-00000.pt")
+        write_chain(self.run, [self.entry])
+        code, out = run_main(self.run)
+        results = {r["file"]: r for r in map(json.loads, out.splitlines())}
+        self.assertEqual(code, 1)
+        self.assertEqual(results["ckpt-00000.pt"]["result"], "PASS")
+        self.assertEqual(results[name]["result"], "FAIL")
+        self.assertIn("no chain entry covers this file, so it was not reviewed", results[name]["problems"])
+
+    def test_checkpoint_without_a_chain_entry_fails(self):
+        # train writes the checkpoint before the chain entry, so a crash leaves exactly this.
+        self.unbound_file_fails("ckpt-00001.pt", self.ck)
+
+    def test_leftover_temporary_checkpoint_fails(self):
+        self.unbound_file_fails("ckpt.tmp", self.ck)
+
+    def test_model_file_without_its_chain_entry_fails(self):
+        self.unbound_file_fails("conversation-model.pt", self.ck["model"])
+
+    def test_only_unbound_files_fail_instead_of_nothing_to_review(self):
+        torch.save(self.ck, self.run / "ckpt-00005.pt")
+        write_chain(self.run, [self.entry])
+        code, out = run_main(self.run)
+        self.assertEqual(code, 1)
+        self.assertEqual([json.loads(line)["file"] for line in out.splitlines()], ["ckpt-00005.pt"])
+
 
 if __name__ == "__main__":
     unittest.main()
